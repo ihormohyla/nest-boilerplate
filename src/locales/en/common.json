@@ -1,0 +1,25 @@
+{
+  "app": {
+    "name": "Nest Monolith Starter",
+    "greeting": "Welcome, {{name}}!"
+  },
+  "auth": {
+    "login_success": "You have successfully logged in.",
+    "invalid_credentials": "Invalid email or password.",
+    "email_taken": "An account with this email already exists.",
+    "invalid_refresh_token": "Invalid or expired refresh token.",
+    "user_not_found": "User not found.",
+    "token_missing": "Authorization token is missing.",
+    "token_revoked": "Token has been revoked.",
+    "bearer_token_required": "Authorization header with Bearer token is required."
+  },
+  "errors": {
+    "forbidden": "You do not have permission to access this resource.",
+    "internal": "An unexpected error occurred. Please try again later.",
+    "not_found": "Resource not found.",
+    "not_found_with_id": "{{resource}} with id {{id}} not found.",
+    "file_not_found": "File not found.",
+    "user_not_found": "User not found."
+  }
+}
+

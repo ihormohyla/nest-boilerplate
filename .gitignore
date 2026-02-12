@@ -1,0 +1,48 @@
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Runtime data
+pids
+*.pid
+*.seed
+*.pid.lock
+
+# Diagnostics
+.eslintcache
+*.tsbuildinfo
+
+# Dependency directories
+node_modules/
+
+# Production
+dist/
+
+# Testing
+coverage/
+
+# Temporary
+tmp/
+
+# Environment
+.env
+.env.local
+.env.*
+!.env.example
+
+# Editors & OS
+.DS_Store
+.idea/
+.vscode/
+
+# Docker / tooling overrides
+docker-compose.override.yml
+
+# Local data
+uploads/
+storage/
+

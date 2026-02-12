@@ -1,0 +1,11 @@
+.s3-sync:
+  stage: s3-sync
+  image: 
+    name: amazon/aws-cli:2.27.50
+    entrypoint: [""]
+  script:
+    - |
+      # syncing with s3...
+      bash ./scripts/s3_sync.sh s3://${S3_SYNC_BUCKET}/${PROJECT_NAME}
+  tags:
+    - alpine

@@ -1,0 +1,25 @@
+{
+  "app": {
+    "name": "Стартовий моноліт Nest",
+    "greeting": "Вітаємо, {{name}}!"
+  },
+  "auth": {
+    "login_success": "Ви успішно увійшли.",
+    "invalid_credentials": "Невірний email або пароль.",
+    "email_taken": "Обліковий запис з цим email вже існує.",
+    "invalid_refresh_token": "Недійсний або прострочений токен оновлення.",
+    "user_not_found": "Користувача не знайдено.",
+    "token_missing": "Токен авторизації відсутній.",
+    "token_revoked": "Токен було відкликано.",
+    "bearer_token_required": "Потрібен заголовок Authorization з Bearer токеном."
+  },
+  "errors": {
+    "forbidden": "У вас немає доступу до цього ресурсу.",
+    "internal": "Сталася неочікувана помилка. Спробуйте пізніше.",
+    "not_found": "Ресурс не знайдено.",
+    "not_found_with_id": "{{resource}} з id {{id}} не знайдено.",
+    "file_not_found": "Файл не знайдено.",
+    "user_not_found": "Користувача не знайдено."
+  }
+}
+

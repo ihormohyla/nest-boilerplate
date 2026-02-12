@@ -1,0 +1,149 @@
+stages:
+  - build
+  - test
+  - s3-sync
+  - trigger-codebuild
+  # - trigger-codedeploy
+
+include:
+  - local: '.gitlab/*.gitlab-ci.yml'
+
+variables:
+  PROJECT_NAME: dre-backend
+  NODE_VERSION: "23"
+  DOCKER_DRIVER: overlay2
+  DOCKER_TLS_CERTDIR: "/certs"
+  # Explicitly set shell for all jobs
+  SHELL: "/bin/sh"
+  # AWS CodeBuild project names - configure these in GitLab CI/CD variables
+  CODEBUILD_PROJECT_DEV: "${CI_CODEBUILD_PROJECT_DEV}"
+  CODEBUILD_PROJECT_STAGE: "${CI_CODEBUILD_PROJECT_STAGE}"
+  CODEBUILD_PROJECT_PROD: "${CI_CODEBUILD_PROJECT_PROD}"
+  # AWS region - configure in GitLab CI/CD variables
+  AWS_REGION: "${CI_AWS_REGION:-$APP_ENV}"
+
+# Cache node_modules to speed up builds
+cache:
+  key:
+    files:
+      - package-lock.json
+  paths:
+    - node_modules/
+  policy: pull
+
+build:
+  stage: build
+  image: node:${NODE_VERSION}-alpine
+  cache:
+    key:
+      files:
+        - package-lock.json
+    paths:
+      - node_modules/
+    policy: pull-push
+  script:
+    - npm ci
+    - npm run build
+  artifacts:
+    paths:
+      - dist/
+      - node_modules/
+    expire_in: 1 hour
+  only:
+    - dev
+    - stage
+    - main
+    - master
+    - merge_requests
+  tags:
+    - alpine
+
+# Lint stage
+lint:
+  stage: test
+  image: node:${NODE_VERSION}-alpine
+  cache:
+    key:
+      files:
+        - package-lock.json
+    paths:
+      - node_modules/
+    policy: pull
+  dependencies:
+    - build
+  script:
+    - npm ci
+    - npm run lint
+  only:
+    - dev
+    - stage
+    - main
+    - master
+    - merge_requests
+  tags:
+    - alpine
+
+# Unit tests
+test:unit:
+  stage: test
+  image: node:${NODE_VERSION}-alpine
+  cache:
+    key:
+      files:
+        - package-lock.json
+    paths:
+      - node_modules/
+    policy: pull
+  dependencies:
+    - build
+  script:
+    - npm ci
+    - npm run test:unit:cov
+  coverage: '/Lines\s*:\s*(\d+\.\d+)%/'
+  artifacts:
+    reports:
+      coverage_report:
+        coverage_format: cobertura
+        path: coverage/cobertura-coverage.xml
+    paths:
+      - coverage/
+    expire_in: 1 week
+  only:
+    - dev
+    - stage
+    - main
+    - master
+    - merge_requests
+  tags:
+    - alpine
+
+
+# ================= s3-sync =================
+development-s3-sync:
+  extends: .s3-sync
+  environment:
+    name: dev
+  only:
+    - dev
+
+
+# ================= trigger-codebuild =================
+development-trigger-codebuild:
+  extends: .trigger-codebuild
+  environment:
+    name: dev
+  only:
+    - dev
+
+
+# ================= trigger-codedeploy =================
+# development-trigger-codedeploy:
+#   extends: .trigger-codedeploy
+#   variables:
+#     # Генеруємо унікальний ключ на основі CI-змінних GitLab
+#     S3_ARTIFACT_KEY: "$PROJECT_NAME/$CI_COMMIT_SHORT_SHA/source.zip" 
+#   environment:
+#     name: dev
+#   only:
+#     - dev
+

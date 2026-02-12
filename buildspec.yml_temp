@@ -1,0 +1,259 @@
+version: 0.2
+
+env:
+  variables:
+    # These will be overridden by GitLab CI environment variables
+    AWS_DEFAULT_REGION: "us-east-1"
+  parameter-store:
+    # Use AWS Systems Manager Parameter Store for sensitive database credentials
+    # Format: /{project}/{environment}/database/{parameter}
+    # Uncomment and configure these based on your Parameter Store setup:
+    # DB_HOST: "/nest-monolit-starter/${ENVIRONMENT}/database/host"
+    # DB_PORT: "/nest-monolit-starter/${ENVIRONMENT}/database/port"
+    # DB_USERNAME: "/nest-monolit-starter/${ENVIRONMENT}/database/username"
+    # DB_PASSWORD: "/nest-monolit-starter/${ENVIRONMENT}/database/password"
+    # DB_NAME: "/nest-monolit-starter/${ENVIRONMENT}/database/name"
+    # REDIS_PASSWORD: "/nest-monolit-starter/${ENVIRONMENT}/redis/password"
+
+phases:
+  pre_build:
+    commands:
+      - echo Logging in to Amazon ECR...
+      - |
+        aws ecr get-login-password --region $AWS_DEFAULT_REGION | \
+        docker login --username AWS --password-stdin $AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com
+      - REPOSITORY_URI=$AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com/$ECR_REPOSITORY
+      - COMMIT_HASH=$(echo $CODEBUILD_RESOLVED_SOURCE_VERSION | cut -c 1-7)
+      - IMAGE_TAG=${IMAGE_TAG:-$COMMIT_HASH}
+      - echo Repository URI: $REPOSITORY_URI
+      - echo Image Tag: $IMAGE_TAG
+      - echo Docker Target: $DOCKER_TARGET
+      - echo Environment: $ENVIRONMENT
+      - echo Generating .env file using config_generator.sh...
+      - |
+        # Generate .env file using config_generator.sh
+        # Set CONFIG_FILE to .env in the current directory
+        export CONFIG_FILE=".env"
+        
+        # Make sure the script is executable
+        chmod +x scripts/config_generator.sh
+        
+        # Clear/create the .env file
+        > $CONFIG_FILE
+        
+        # Environment variables should already be available from CodeBuild environment
+        # The config_generator.sh script will use them to populate the .env file
+        bash scripts/config_generator.sh
+        
+        # Verify .env file was created
+        if [ -f "$CONFIG_FILE" ]; then
+          echo ".env file generated successfully"
+          echo "File size: $(wc -l < $CONFIG_FILE) lines"
+          echo "Variables in .env:"
+          grep -E "^[A-Z_]+=" $CONFIG_FILE | cut -d'=' -f1 | sed 's/^/  - /' || echo "  (no variables found)"
+        else
+          echo "ERROR: .env file was not generated!"
+          exit 1
+        fi
+  build:
+    commands:
+      - echo Build started on `date`
+      - echo Building the Docker image...
+      - |
+        docker build \
+          --target ${DOCKER_TARGET:-production} \
+          --build-arg NODE_ENV=${ENVIRONMENT:-production} \
+          -t $REPOSITORY_URI:$IMAGE_TAG \
+          -t $REPOSITORY_URI:latest \
+          .
+      - echo Build completed on `date`
+  post_build:
+    commands:
+      - echo Pushing the Docker images...
+      - docker push $REPOSITORY_URI:$IMAGE_TAG
+      - docker push $REPOSITORY_URI:latest
+      - echo Running database migrations...
+      - |
+        # Run migrations using the Docker image we just built
+        # This ensures migrations run with the same code version as the deployment
+        # Database credentials can come from:
+        # 1. Environment variables (if passed from GitLab CI)
+        # 2. AWS Systems Manager Parameter Store (configured above)
+        # 3. AWS Secrets Manager (if configured)
+        
+        # Check if database credentials are available
+        if [ -z "${DB_HOST}" ] || [ -z "${DB_USERNAME}" ] || [ -z "${DB_PASSWORD}" ]; then
+          echo "WARNING: Database credentials not found. Skipping migrations."
+          echo "Please configure DB_HOST, DB_USERNAME, DB_PASSWORD via Parameter Store or environment variables."
+        else
+          echo "Running migrations against database: ${DB_HOST}:${DB_PORT:-3306}/${DB_NAME}"
+          docker run --rm \
+            -e NODE_ENV=${ENVIRONMENT:-production} \
+            -e DB_HOST=${DB_HOST} \
+            -e DB_PORT=${DB_PORT:-3306} \
+            -e DB_USERNAME=${DB_USERNAME} \
+            -e DB_PASSWORD=${DB_PASSWORD} \
+            -e DB_NAME=${DB_NAME} \
+            $REPOSITORY_URI:$IMAGE_TAG \
+            npm run migration:run || {
+              echo "ERROR: Migration failed!"
+              echo "Deployment will continue but the database may be in an inconsistent state."
+              echo "Please check migrations manually and fix any issues."
+              # Uncomment the line below to fail deployment on migration errors (recommended for production)
+              exit 1
+            }
+        fi
+      - echo Writing image definitions file...
+      - |
+        printf '[{"name":"%s","imageUri":"%s"}]' \
+          $ECS_SERVICE \
+          $REPOSITORY_URI:$IMAGE_TAG > imagedefinitions.json
+      - cat imagedefinitions.json
+      - echo Updating ECS service...
+      - |
+        aws ecs update-service \
+          --cluster $ECS_CLUSTER \
+          --service $ECS_SERVICE \
+          --force-new-deployment \
+          --region $AWS_DEFAULT_REGION
+      - echo Waiting for service to stabilize...
+      - |
+        aws ecs wait services-stable \
+          --cluster $ECS_CLUSTER \
+          --services $ECS_SERVICE \
+          --region $AWS_DEFAULT_REGION
+      - echo Running health check...
+      - |
+        # Health check configuration
+        HEALTH_CHECK_URL="${HEALTH_CHECK_URL:-}"
+        HEALTH_CHECK_PATH="${HEALTH_CHECK_PATH:-/api/v1/health}"
+        MAX_RETRIES=${HEALTH_CHECK_MAX_RETRIES:-30}
+        RETRY_INTERVAL=${HEALTH_CHECK_RETRY_INTERVAL:-10}
+        
+        # If HEALTH_CHECK_URL is not provided, try to construct it from ECS service or CI environment URL
+        if [ -z "${HEALTH_CHECK_URL}" ]; then
+          echo "HEALTH_CHECK_URL not provided, attempting to get from ECS service or CI environment..."
+          
+          # First, try using the environment URL from GitLab CI
+          if [ -n "${CI_ENVIRONMENT_URL}" ]; then
+            HEALTH_CHECK_URL="${CI_ENVIRONMENT_URL}${HEALTH_CHECK_PATH}"
+            echo "Using CI_ENVIRONMENT_URL: ${HEALTH_CHECK_URL}"
+          else
+            # Try to get load balancer DNS from ECS service
+            LB_ARN=$(aws ecs describe-services \
+              --cluster $ECS_CLUSTER \
+              --services $ECS_SERVICE \
+              --region $AWS_DEFAULT_REGION \
+              --query 'services[0].loadBalancers[0].targetGroupArn' \
+              --output text 2>/dev/null || echo "")
+            
+            if [ -n "${LB_ARN}" ] && [ "${LB_ARN}" != "None" ]; then
+              # Get the load balancer ARN from the target group
+              LB_ARN_FULL=$(aws elbv2 describe-target-groups \
+                --target-group-arns "${LB_ARN}" \
+                --region $AWS_DEFAULT_REGION \
+                --query 'TargetGroups[0].LoadBalancerArns[0]' \
+                --output text 2>/dev/null || echo "")
+              
+              if [ -n "${LB_ARN_FULL}" ] && [ "${LB_ARN_FULL}" != "None" ]; then
+                # Get the DNS name from the load balancer
+                LB_DNS=$(aws elbv2 describe-load-balancers \
+                  --load-balancer-arns "${LB_ARN_FULL}" \
+                  --region $AWS_DEFAULT_REGION \
+                  --query 'LoadBalancers[0].DNSName' \
+                  --output text 2>/dev/null || echo "")
+                
+                if [ -n "${LB_DNS}" ] && [ "${LB_DNS}" != "None" ]; then
+                  # Determine if it's HTTP or HTTPS (check scheme)
+                  LB_SCHEME=$(aws elbv2 describe-load-balancers \
+                    --load-balancer-arns "${LB_ARN_FULL}" \
+                    --region $AWS_DEFAULT_REGION \
+                    --query 'LoadBalancers[0].Scheme' \
+                    --output text 2>/dev/null || echo "http")
+                  
+                  if [ "${LB_SCHEME}" = "internet-facing" ] || [ "${LB_SCHEME}" = "internal" ]; then
+                    HEALTH_CHECK_URL="http://${LB_DNS}${HEALTH_CHECK_PATH}"
+                    echo "Using load balancer DNS: ${HEALTH_CHECK_URL}"
+                  fi
+                fi
+              fi
+            fi
+          fi
+        fi
+        
+        if [ -z "${HEALTH_CHECK_URL}" ]; then
+          echo "WARNING: Could not determine health check URL. Skipping health check."
+          echo "Please set HEALTH_CHECK_URL environment variable or configure load balancer."
+        else
+          echo "Health check URL: ${HEALTH_CHECK_URL}"
+          echo "Max retries: ${MAX_RETRIES}, Interval: ${RETRY_INTERVAL}s"
+          
+          # Wait a bit for the service to be ready
+          echo "Waiting ${RETRY_INTERVAL} seconds for service to be ready..."
+          sleep $RETRY_INTERVAL
+          
+          # Install curl if not available
+          if ! command -v curl &> /dev/null; then
+            echo "Installing curl..."
+            apt-get update -qq && apt-get install -y -qq curl > /dev/null 2>&1 || \
+            yum install -y -q curl > /dev/null 2>&1 || \
+            apk add --no-cache curl > /dev/null 2>&1
+          fi
+          
+          # Perform health check with retries
+          RETRY_COUNT=0
+          HEALTH_CHECK_PASSED=false
+          
+          while [ $RETRY_COUNT -lt $MAX_RETRIES ]; do
+            echo "Health check attempt $((RETRY_COUNT + 1))/${MAX_RETRIES}..."
+            
+            HTTP_CODE=$(curl -s -o /tmp/health_response.json -w "%{http_code}" \
+              --max-time 10 \
+              --connect-timeout 5 \
+              "${HEALTH_CHECK_URL}" 2>/dev/null || echo "000")
+            
+            if [ "${HTTP_CODE}" = "200" ]; then
+              # Check if response contains "ok" status
+              if grep -q '"status".*"ok"' /tmp/health_response.json 2>/dev/null || \
+                 grep -q '"status":\s*"ok"' /tmp/health_response.json 2>/dev/null; then
+                echo "✓ Health check passed!"
+                echo "Response: $(cat /tmp/health_response.json)"
+                HEALTH_CHECK_PASSED=true
+                break
+              else
+                echo "Health endpoint returned 200 but status is not 'ok'"
+                echo "Response: $(cat /tmp/health_response.json 2>/dev/null || echo 'N/A')"
+              fi
+            else
+              echo "Health check failed with HTTP code: ${HTTP_CODE}"
+              if [ -f /tmp/health_response.json ]; then
+                echo "Response: $(cat /tmp/health_response.json)"
+              fi
+            fi
+            
+            RETRY_COUNT=$((RETRY_COUNT + 1))
+            
+            if [ $RETRY_COUNT -lt $MAX_RETRIES ]; then
+              echo "Retrying in ${RETRY_INTERVAL} seconds..."
+              sleep $RETRY_INTERVAL
+            fi
+          done
+          
+          if [ "${HEALTH_CHECK_PASSED}" = "false" ]; then
+            echo "ERROR: Health check failed after ${MAX_RETRIES} attempts!"
+            echo "The deployment completed but the service may not be healthy."
+            echo "Please check the service logs and health endpoint manually."
+            exit 1
+          fi
+        fi
+      - echo Deployment completed on `date`
+
+artifacts:
+  files:
+    - imagedefinitions.json
+  name: imagedefinitions-$(date +%Y-%m-%d)
+
+cache:
+  paths:
+    - '/root/.docker/**/*'
+

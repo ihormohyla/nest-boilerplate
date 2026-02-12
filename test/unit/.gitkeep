@@ -1,0 +1,4 @@
+# Unit tests directory
+# Place unit test files here following the module structure:
+# test/unit/modules/{module-name}/{service|controller|guard|filter}.spec.ts
+
